@@ -187,10 +187,10 @@ prompt_image_tag() {
 show_deployment_status() {
     local namespace="${NAMESPACE:-default}"
     local service="${SERVICE_NAME}"
-    local k8s_image
-    local current_tag
-    local last_built_tag
-    local env_tag
+    local k8s_image=""
+    local current_tag=""
+    local last_built_tag=""
+    local env_tag=""
 
     print_section "📦 Current Deployment Status"
     echo ""
