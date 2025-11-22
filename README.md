@@ -21,7 +21,7 @@ Built by **[XIOTS](https://xiots.io)** - A Software Development and Digital Mark
 ### Homebrew (Recommended)
 
 ```bash
-brew tap xiots/xiops
+brew tap Comms-Source-Ltd/xiops https://github.com/Comms-Source-Ltd/xiops
 brew install xiops
 ```
 
