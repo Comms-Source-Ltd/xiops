@@ -15,7 +15,7 @@ class Xiops < Formula
     libexec.install Dir["*"]
 
     # Create executable wrapper in bin
-    bin.write_exec_script (libexec/"xiops")
+    bin.write_exec_script (libexec/"XIOPS")
   end
 
   def caveats
