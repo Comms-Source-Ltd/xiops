@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XIOPS - Project-Agnostic Deployment CLI for Azure</title>
+    <meta name="description" content="XIOPS is a powerful CLI tool for building and deploying applications to Azure Container Registry (ACR) and Azure Kubernetes Service (AKS).">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --secondary: #0ea5e9;
+            --accent: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --bg-dark: #0f172a;
+            --bg-darker: #020617;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border: #334155;
+            --gradient-1: linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%);
+            --gradient-2: linear-gradient(135deg, #10b981 0%, #0ea5e9 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        nav .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 72px;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+            font-size: 1rem;
+        }
+
+        .btn-primary {
+            background: var(--gradient-1);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+        }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-card-hover);
+        }
+
+        /* Hero Section */
+        .hero {
+            padding: 160px 0 120px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        .hero-badge span {
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4rem);
+            font-weight: 700;
+            line-height: 1.1;
+            margin-bottom: 24px;
+            background: linear-gradient(135deg, var(--text-primary) 0%, var(--text-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero h1 .highlight {
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 640px;
+            margin: 0 auto 40px;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .hero-terminal {
+            max-width: 700px;
+            margin: 60px auto 0;
+            background: var(--bg-darker);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            text-align: left;
+        }
+
+        .terminal-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .terminal-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .terminal-dot.red { background: #ef4444; }
+        .terminal-dot.yellow { background: #f59e0b; }
+        .terminal-dot.green { background: #10b981; }
+
+        .terminal-body {
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.8;
+        }
+
+        .terminal-line {
+            display: flex;
+            gap: 8px;
+        }
+
+        .terminal-prompt {
+            color: var(--accent);
+        }
+
+        .terminal-command {
+            color: var(--text-primary);
+        }
+
+        .terminal-output {
+            color: var(--text-secondary);
+            padding-left: 20px;
+        }
+
+        .terminal-success {
+            color: var(--accent);
+        }
+
+        /* Features Section */
+        .features {
+            padding: 120px 0;
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 64px;
+        }
+
+        .section-label {
+            display: inline-block;
+            padding: 6px 12px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            border-radius: 100px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 16px;
+        }
+
+        .section-header h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .section-header p {
+            color: var(--text-secondary);
+            font-size: 1.125rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 24px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+            transition: all 0.3s;
+        }
+
+        .feature-card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-4px);
+            border-color: var(--primary);
+        }
+
+        .feature-icon {
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--gradient-1);
+            border-radius: 12px;
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .feature-card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        /* Commands Section */
+        .commands {
+            padding: 120px 0;
+            background: var(--bg-darker);
+        }
+
+        .commands-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .command-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+        }
+
+        .command-card h4 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            color: var(--secondary);
+            margin-bottom: 8px;
+        }
+
+        .command-card p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+
+        /* Workflow Section */
+        .workflow {
+            padding: 120px 0;
+        }
+
+        .workflow-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .workflow-step {
+            display: flex;
+            gap: 24px;
+            align-items: flex-start;
+        }
+
+        .step-number {
+            width: 48px;
+            height: 48px;
+            min-width: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--gradient-1);
+            border-radius: 50%;
+            font-weight: 700;
+            font-size: 1.25rem;
+        }
+
+        .step-content h3 {
+            font-size: 1.25rem;
+            margin-bottom: 8px;
+        }
+
+        .step-content p {
+            color: var(--text-secondary);
+        }
+
+        .step-code {
+            margin-top: 16px;
+            background: var(--bg-darker);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--secondary);
+        }
+
+        /* Installation Section */
+        .installation {
+            padding: 120px 0;
+            background: var(--bg-darker);
+        }
+
+        .install-box {
+            max-width: 600px;
+            margin: 0 auto;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .install-box h3 {
+            font-size: 1.5rem;
+            margin-bottom: 24px;
+        }
+
+        .install-command {
+            background: var(--bg-darker);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 24px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            color: var(--accent);
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .copy-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-card-hover);
+        }
+
+        /* Footer */
+        footer {
+            padding: 60px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+        }
+
+        footer p {
+            color: var(--text-muted);
+        }
+
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-links {
+                display: none;
+            }
+
+            .hero {
+                padding: 120px 0 80px;
+            }
+
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .workflow-step {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav>
+        <div class="container">
+            <div class="logo">XIOPS</div>
+            <ul class="nav-links">
+                <li><a href="#features">Features</a></li>
+                <li><a href="#commands">Commands</a></li>
+                <li><a href="#workflow">Workflow</a></li>
+                <li><a href="#installation">Installation</a></li>
+            </ul>
+            <a href="https://github.com/Comms-Source-Ltd/xiops" class="btn btn-secondary" target="_blank">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="container">
+            <div class="hero-badge">
+                <span>v1.1.0</span> Now with Database Migrations Support
+            </div>
+            <h1>Deploy to Azure<br><span class="highlight">with a Single Command</span></h1>
+            <p>XIOPS is a powerful, project-agnostic CLI for building and deploying containerized applications to Azure Container Registry (ACR) and Azure Kubernetes Service (AKS). Built by the <a href="https://www.xiots.io" target="_blank" style="color: var(--primary); text-decoration: none; font-weight: 500;">XIOTS</a> team.</p>
+            <div class="hero-buttons">
+                <a href="#installation" class="btn btn-primary">
+                    Get Started
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </a>
+                <a href="https://github.com/Comms-Source-Ltd/xiops" class="btn btn-secondary" target="_blank">
+                    View on GitHub
+                </a>
+            </div>
+
+            <div class="hero-terminal">
+                <div class="terminal-header">
+                    <div class="terminal-dot red"></div>
+                    <div class="terminal-dot yellow"></div>
+                    <div class="terminal-dot green"></div>
+                </div>
+                <div class="terminal-body">
+                    <div class="terminal-line">
+                        <span class="terminal-prompt">$</span>
+                        <span class="terminal-command">xiops release</span>
+                    </div>
+                    <div class="terminal-output">Building Docker image...</div>
+                    <div class="terminal-output terminal-success">✅ Image pushed to ACR</div>
+                    <div class="terminal-output">Running database migrations...</div>
+                    <div class="terminal-output terminal-success">✅ Migrations completed</div>
+                    <div class="terminal-output">Deploying to AKS...</div>
+                    <div class="terminal-output terminal-success">✅ Deployment successful!</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features" id="features">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-label">Features</span>
+                <h2>Everything You Need to Deploy</h2>
+                <p>A complete toolkit for managing your Azure deployments from build to production.</p>
+            </div>
+
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🐳</div>
+                    <h3>Docker Build & Push</h3>
+                    <p>Build multi-platform Docker images and push to Azure Container Registry with automatic tagging and versioning. Supports buildx for cross-platform builds.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">☸️</div>
+                    <h3>Kubernetes Deployment</h3>
+                    <p>Deploy to AKS with intelligent manifest processing, environment variable substitution, and Kustomize support. Automatic rollout monitoring included.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🗃️</div>
+                    <h3>Database Migrations</h3>
+                    <p>Run Alembic migrations automatically before deployments via Kubernetes Jobs. Includes status checking, history viewing, and rollback support.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🔐</div>
+                    <h3>Azure Key Vault Integration</h3>
+                    <p>Manage secrets with full Key Vault support. List, get, set, delete secrets, and sync your .env files directly to Azure Key Vault.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">🔄</div>
+                    <h3>Rollback & Recovery</h3>
+                    <p>Instant rollback to previous deployments with a single command. Built-in deployment health checks and automatic recovery suggestions.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">📊</div>
+                    <h3>Real-time Monitoring</h3>
+                    <p>Stream pod logs, watch deployments, check resource usage, and debug issues with comprehensive kubectl wrappers built right in.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Commands Section -->
+    <section class="commands" id="commands">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-label">Commands</span>
+                <h2>Powerful CLI Commands</h2>
+                <p>Simple, intuitive commands for every stage of your deployment workflow.</p>
+            </div>
+
+            <div class="commands-grid">
+                <div class="command-card">
+                    <h4>xiops build</h4>
+                    <p>Build and push Docker image to ACR with interactive tag selection</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops deploy</h4>
+                    <p>Deploy to AKS cluster with automatic migrations</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops release</h4>
+                    <p>Full release workflow: build + migrate + deploy</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops migrate</h4>
+                    <p>Run database migrations via Kubernetes Job</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops migrate status</h4>
+                    <p>Check current migration revision</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops rollback</h4>
+                    <p>Rollback to previous deployment</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops logs</h4>
+                    <p>Stream real-time pod logs</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops status</h4>
+                    <p>View current deployment status</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops secret list</h4>
+                    <p>List all secrets in Azure Key Vault</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops secret sync</h4>
+                    <p>Sync .env secrets to Key Vault</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops k pods</h4>
+                    <p>List pods with kubectl wrapper</p>
+                </div>
+                <div class="command-card">
+                    <h4>xiops k exec</h4>
+                    <p>Exec into pod for debugging</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Workflow Section -->
+    <section class="workflow" id="workflow">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-label">Workflow</span>
+                <h2>Get Started in Minutes</h2>
+                <p>From installation to deployment in four simple steps.</p>
+            </div>
+
+            <div class="workflow-steps">
+                <div class="workflow-step">
+                    <div class="step-number">1</div>
+                    <div class="step-content">
+                        <h3>Install XIOPS</h3>
+                        <p>Install via Homebrew with a single command. All dependencies are handled automatically.</p>
+                        <div class="step-code">brew tap Comms-Source-Ltd/xiops && brew install xiops</div>
+                    </div>
+                </div>
+
+                <div class="workflow-step">
+                    <div class="step-number">2</div>
+                    <div class="step-content">
+                        <h3>Initialize Your Project</h3>
+                        <p>Run xiops init to create a .env template with all required configuration variables.</p>
+                        <div class="step-code">xiops init</div>
+                    </div>
+                </div>
+
+                <div class="workflow-step">
+                    <div class="step-number">3</div>
+                    <div class="step-content">
+                        <h3>Configure Your Environment</h3>
+                        <p>Edit the .env file with your Azure resources: ACR name, AKS cluster, resource group, namespace, and service name.</p>
+                        <div class="step-code">
+SERVICE_NAME=my-service<br>
+ACR_NAME=myacr<br>
+AKS_CLUSTER_NAME=my-cluster<br>
+RESOURCE_GROUP=my-rg<br>
+NAMESPACE=production
+                        </div>
+                    </div>
+                </div>
+
+                <div class="workflow-step">
+                    <div class="step-number">4</div>
+                    <div class="step-content">
+                        <h3>Deploy!</h3>
+                        <p>Build, migrate, and deploy with a single command. XIOPS handles everything else.</p>
+                        <div class="step-code">xiops release</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Installation Section -->
+    <section class="installation" id="installation">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-label">Installation</span>
+                <h2>Ready to Deploy Faster?</h2>
+                <p>Install XIOPS with Homebrew and start deploying in seconds.</p>
+            </div>
+
+            <div class="install-box">
+                <h3>Install with Homebrew</h3>
+                <div class="install-command">
+                    <span>brew tap Comms-Source-Ltd/xiops && brew install xiops</span>
+                    <button class="copy-btn" onclick="copyCommand(this)" title="Copy to clipboard">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </div>
+                <p style="color: var(--text-muted); font-size: 0.875rem;">Requires Azure CLI and kubectl to be installed.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <p>Built with ❤️ by <a href="https://github.com/Comms-Source-Ltd" target="_blank">Comms Source Ltd</a></p>
+            <p style="margin-top: 8px;">Licensed under MIT | <a href="https://github.com/Comms-Source-Ltd/xiops" target="_blank">View Source</a></p>
+            <p style="margin-top: 16px;">
+                <a href="https://www.xiots.io" target="_blank" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: var(--gradient-1); color: white; border-radius: 8px; font-weight: 600; text-decoration: none;">
+                    Discover XIOTS →
+                </a>
+            </p>
+        </div>
+    </footer>
+
+    <script>
+        function copyCommand(btn) {
+            const command = btn.parentElement.querySelector('span').textContent;
+            navigator.clipboard.writeText(command).then(() => {
+                btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                setTimeout(() => {
+                    btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+                }, 2000);
+            });
+        }
+
+        // Smooth scroll for navigation
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                document.querySelector(this.getAttribute('href')).scrollIntoView({
+                    behavior: 'smooth'
+                });
+            });
+        });
+    </script>
+</body>
+</html>
