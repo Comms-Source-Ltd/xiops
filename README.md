@@ -10,6 +10,10 @@ Built by **[XIOTS](https://xiots.io)** - A Software Development and Digital Mark
 
 - **Simple Build & Deploy** - Build Docker images and deploy to AKS with a single command
 - **Smart Image Tagging** - Prompts for image tag and shows currently deployed version for easy tracking
+- **AI-Powered Error Analysis** - Automatic error detection with AI-powered diagnostics (supports OpenAI, Claude, Ollama)
+- **Real-time Deployment Monitoring** - Live pod status with elapsed time, automatic error detection
+- **Interactive Error Recovery** - When deployments fail, choose to redeploy, sync secrets, sync configmaps, or cancel
+- **ConfigMap & SPC Generation** - Auto-generate ConfigMaps and SecretProviderClass from `.env` files
 - **Azure Key Vault Integration** - Securely manage secrets with built-in Key Vault commands
 - **kubectl Wrapper** - Common kubectl operations without remembering namespace flags
 - **Rolling Updates** - Safe deployments with rollback support
@@ -68,6 +72,17 @@ ln -s $(pwd)/xiops /usr/local/bin/xiops
 | `xiops config` | Show current configuration |
 | `xiops kv` | Azure Key Vault operations |
 | `xiops k` | kubectl wrapper commands |
+| `xiops configmap` | Generate ConfigMap from .env |
+| `xiops spc` | Generate SecretProviderClass from .env |
+| `xiops spc sync` | Sync secrets to Azure Key Vault |
+
+### ConfigMap & Secret Commands
+
+| Command | Description |
+|---------|-------------|
+| `xiops configmap` | Generate ConfigMap from .env (variables marked `# SECRET=NO`) |
+| `xiops spc` | Generate SecretProviderClass from .env (variables marked `# SECRET=YES`) |
+| `xiops spc sync` | Sync secrets marked `# SECRET=YES` to Azure Key Vault |
 
 ### Key Vault Commands (`xiops kv`)
 
@@ -132,6 +147,29 @@ SUBSCRIPTION_ID=your-subscription-id
 TENANT_ID=your-tenant-id
 KEY_VAULT_NAME=your-keyvault
 WORKLOAD_IDENTITY_CLIENT_ID=your-client-id
+
+# AI Provider for error analysis (optional)
+AI_PROVIDER=openai  # Options: openai, claude, ollama
+OPENAI_API_KEY=your-openai-key
+# Or for Claude:
+# ANTHROPIC_API_KEY=your-anthropic-key
+# Or for Ollama:
+# OLLAMA_HOST=http://localhost:11434
+# OLLAMA_MODEL=llama2
+```
+
+### Environment Variable Annotations
+
+Mark variables in your `.env` file to control where they go:
+
+```bash
+# Non-sensitive config → ConfigMap
+APP_ENV=production # SECRET=NO
+LOG_LEVEL=info # SECRET=NO
+
+# Sensitive secrets → Key Vault + SecretProviderClass
+DATABASE_URL=postgres://... # SECRET=YES
+API_KEY=xxx # SECRET=YES
 ```
 
 ## Project Structure
@@ -234,6 +272,51 @@ xiops logs
 ### Rollback to previous version
 ```bash
 xiops rollback
+```
+
+### Deployment Monitoring
+
+During deployment, XIOPS monitors pod status in real-time:
+
+```
+⏳ Waiting for Deployment
+
+Pod Status (15s elapsed):
+  ◐ my-service-abc123 0/1 ContainerCreating aks-node-1
+  ✓ my-service-def456 1/1 Running aks-node-2
+
+✓ Deployment Success!
+
+Useful commands:
+  xiops logs        - View pod logs
+  xiops status      - Show deployment status
+  xiops k shell     - Get shell access to pod
+  xiops k describe  - Describe pod details
+```
+
+### Error Recovery
+
+When deployment errors are detected, XIOPS shows the error events and provides options:
+
+```
+✗ Deployment has errors
+
+Events for my-service-abc123:
+  Warning  Failed  SecretProviderClass "my-spc" not found
+
+⏳ Analyzing with AI (openai)...
+ISSUE: SecretProviderClass not found
+CAUSE: The SPC manifest hasn't been applied
+FIX: Generate and apply the SecretProviderClass
+COMMAND: xiops spc
+
+What would you like to do?
+  1) Deploy Again
+  2) Sync SPC (SecretProviderClass)
+  3) Sync ConfigMap
+  4) Cancel and Check Code
+
+Choice [1-4]:
 ```
 
 ## Dependencies

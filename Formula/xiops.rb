@@ -1,10 +1,10 @@
 class Xiops < Formula
   desc "Project-agnostic deployment CLI for Azure Container Registry and AKS"
   homepage "https://github.com/Comms-Source-Ltd/xiops"
-  url "https://github.com/Comms-Source-Ltd/xiops/archive/refs/tags/v1.1.0.tar.gz"
+  url "https://github.com/Comms-Source-Ltd/xiops/archive/refs/tags/v1.1.1.tar.gz"
   sha256 "d34ae6e0a8816273368330310dd0e697f39ec92c92bb22315edc5677c11ed3e9"
   license "MIT"
-  version "1.1.0"
+  version "1.1.1"
 
   depends_on "azure-cli"
   depends_on "kubernetes-cli"
@@ -15,7 +15,7 @@ class Xiops < Formula
     libexec.install Dir["*"]
 
     # Create executable wrapper in bin
-    bin.write_exec_script (libexec/"XIOPS")
+    bin.write_exec_script (libexec/"xiops")
   end
 
   def caveats

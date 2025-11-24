@@ -118,48 +118,261 @@ aks_apply_manifests() {
 aks_wait_rollout() {
     local deployment="${1:-$SERVICE_NAME}"
     local namespace="${2:-$NAMESPACE}"
-    local timeout="${3:-5m}"
+    local check_interval=5
+    local timeout_seconds=300  # 5 minutes default
+    local stuck_threshold=60   # Check stuck pods after 60 seconds
 
     print_section "⏳ Waiting for Deployment"
-    print_step "Waiting for pods to be ready..."
 
-    if kubectl rollout status "deployment/${deployment}" -n "$namespace" --timeout="$timeout"; then
-        print_success "Deployment rollout complete"
-        return 0
-    else
-        print_error "Deployment rollout failed or timed out"
-        echo ""
+    local start_time=$(date +%s)
 
-        # Show pod status
-        print_section "🔍 Debugging Information"
-        echo ""
-        echo -e "${BOLD}${WHITE}Pod Status:${NC}"
-        kubectl get pods -n "$namespace" -l "app=${deployment}" 2>/dev/null
-        echo ""
+    # Wait briefly for pods to start creating
+    sleep 3
 
-        # Get pod events for troubleshooting
-        echo -e "${BOLD}${WHITE}Recent Pod Events:${NC}"
-        kubectl get events -n "$namespace" --sort-by='.lastTimestamp' 2>/dev/null | grep -i "$deployment" | tail -10
-        echo ""
+    # Monitor pods until ready or error
+    while true; do
+        local elapsed=$(( $(date +%s) - start_time ))
 
-        # Show detailed pod errors
-        local pod
-        pod=$(kubectl get pod -n "$namespace" -l "app=${deployment}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-        if [[ -n "$pod" ]]; then
-            echo -e "${BOLD}${WHITE}Pod Describe (Events):${NC}"
-            kubectl describe pod "$pod" -n "$namespace" 2>/dev/null | grep -A 20 "^Events:" | head -25
+        # Check timeout
+        if [[ $elapsed -ge $timeout_seconds ]]; then
+            print_error "Deployment timed out after ${timeout_seconds}s"
+            aks_check_and_show_result "$deployment" "$namespace"
+            return 1
         fi
 
-        echo ""
-        print_info "Run 'xiops k describe pod' for full details"
+        # Get pod status
+        local pod_info
+        pod_info=$(kubectl get pods -n "$namespace" -l "app=${deployment}" --no-headers -o wide 2>/dev/null)
 
-        # Attempt rollout restart to pick up any recent changes
-        echo ""
-        print_step "Attempting rollout restart to recover..."
-        kubectl rollout restart "deployment/${deployment}" -n "$namespace" 2>/dev/null
+        # Count ready pods
+        local total_pods ready_pods
+        if [[ -n "$pod_info" ]]; then
+            total_pods=$(echo "$pod_info" | grep -c "." 2>/dev/null) || total_pods=0
+            ready_pods=$(echo "$pod_info" | grep -c "Running.*1/1" 2>/dev/null) || ready_pods=0
+        else
+            total_pods=0
+            ready_pods=0
+        fi
 
-        return 1
+        # Display current status
+        echo ""
+        echo -e "${BOLD}${WHITE}Pod Status (${elapsed}s elapsed):${NC}"
+        if [[ -n "$pod_info" ]]; then
+            echo "$pod_info" | while read -r line; do
+                local pod_name status ready node
+                pod_name=$(echo "$line" | awk '{print $1}')
+                ready=$(echo "$line" | awk '{print $2}')
+                status=$(echo "$line" | awk '{print $3}')
+                node=$(echo "$line" | awk '{print $7}')
+
+                local icon
+                case "$status" in
+                    Running)
+                        if [[ "$ready" == "1/1" ]]; then
+                            icon="${GREEN}✓${NC}"
+                        else
+                            icon="${YELLOW}◐${NC}"
+                        fi
+                        ;;
+                    ContainerCreating|Pending)
+                        icon="${YELLOW}◐${NC}"
+                        ;;
+                    *)
+                        icon="${RED}✗${NC}"
+                        ;;
+                esac
+
+                echo -e "  ${icon} ${CYAN}${pod_name}${NC} ${DIM}${ready}${NC} ${status} ${DIM}${node}${NC}"
+            done
+        else
+            echo -e "  ${YELLOW}No pods found${NC}"
+        fi
+        echo ""
+
+        # Check if all pods are ready - run describe to verify
+        if [[ "$ready_pods" -gt 0 && "$ready_pods" -eq "$total_pods" ]]; then
+            aks_check_and_show_result "$deployment" "$namespace"
+            return $?
+        fi
+
+        # Check for non-ready pods and run describe to check events
+        if [[ -n "$pod_info" ]]; then
+            local non_ready_pods
+            non_ready_pods=$(echo "$pod_info" | grep -vE "Running.*1/1" || true)
+            if [[ -n "$non_ready_pods" ]]; then
+                # Run describe to check events for errors
+                local check_result
+                check_result=$(aks_check_events_for_errors "$deployment" "$namespace")
+
+                if [[ "$check_result" == "error" ]]; then
+                    # Error found - show full result with AI and menu
+                    aks_show_error_result "$deployment" "$namespace"
+                    return $?
+                fi
+                # No error yet - continue waiting
+            fi
+        fi
+
+        # Wait before next check
+        sleep $check_interval
+    done
+}
+
+# =============================================
+# Check events for errors (returns "error" or "ok")
+# =============================================
+aks_check_events_for_errors() {
+    local deployment="$1"
+    local namespace="$2"
+
+    # Get the newest pod
+    local target_pod
+    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
+        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+
+    if [[ -z "$target_pod" ]]; then
+        echo "ok"
+        return
     fi
+
+    # Run describe and get events
+    local events
+    events=$(kubectl describe pod "$target_pod" -n "$namespace" 2>&1 | sed -n '/^Events:/,$ p')
+
+    # Check for errors in events
+    if echo "$events" | grep -qiE "Failed|Error|BackOff|not found|forbidden|denied|exceeded|unhealthy"; then
+        echo "error"
+    else
+        echo "ok"
+    fi
+}
+
+# =============================================
+# Show success result
+# =============================================
+aks_check_and_show_result() {
+    local deployment="$1"
+    local namespace="$2"
+
+    # Get the newest pod
+    local target_pod
+    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
+        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+
+    # Run describe and get events
+    local events
+    events=$(kubectl describe pod "$target_pod" -n "$namespace" 2>&1 | sed -n '/^Events:/,$ p')
+
+    # Check for errors in events
+    if echo "$events" | grep -qiE "Failed|Error|BackOff|not found|forbidden|denied|exceeded|unhealthy"; then
+        aks_show_error_result "$deployment" "$namespace"
+        return $?
+    fi
+
+    # Success
+    echo ""
+    print_success "Deployment Success!"
+    echo ""
+    aks_show_hints "$deployment" "$namespace"
+    return 0
+}
+
+# =============================================
+# Show error result with AI and menu
+# =============================================
+aks_show_error_result() {
+    local deployment="$1"
+    local namespace="$2"
+
+    # Get the newest pod
+    local target_pod
+    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
+        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+
+    # Get events
+    local events
+    events=$(kubectl describe pod "$target_pod" -n "$namespace" 2>&1 | sed -n '/^Events:/,$ p')
+
+    echo ""
+    print_error "Deployment has errors"
+    echo ""
+    echo -e "${BOLD}${WHITE}Events for ${target_pod}:${NC}"
+    echo "$events" | head -25
+    echo ""
+
+    # AI analysis if configured
+    if ai_is_configured; then
+        print_step "Analyzing with AI (${AI_PROVIDER})..."
+        ai_analyze_pod_events "$target_pod" "$namespace"
+        echo ""
+    fi
+
+    # Show menu
+    aks_show_error_menu "$deployment" "$namespace"
+    return $?
+}
+
+# =============================================
+# Show deployment hints
+# =============================================
+aks_show_hints() {
+    local deployment="$1"
+    local namespace="$2"
+
+    echo -e "${BOLD}${WHITE}Useful commands:${NC}"
+    echo -e "  ${CYAN}xiops logs${NC}        - View pod logs"
+    echo -e "  ${CYAN}xiops status${NC}      - Show deployment status"
+    echo -e "  ${CYAN}xiops k shell${NC}     - Get shell access to pod"
+    echo -e "  ${CYAN}xiops k describe${NC}  - Describe pod details"
+    echo ""
+}
+
+# =============================================
+# Show error menu
+# =============================================
+aks_show_error_menu() {
+    local deployment="$1"
+    local namespace="$2"
+
+    echo -e "${BOLD}${WHITE}What would you like to do?${NC}"
+    echo -e "  ${CYAN}1${NC}) Deploy Again"
+    echo -e "  ${CYAN}2${NC}) Sync SPC (SecretProviderClass)"
+    echo -e "  ${CYAN}3${NC}) Sync ConfigMap"
+    echo -e "  ${CYAN}4${NC}) Cancel and Check Code"
+    echo ""
+    printf "Choice [1-4]: "
+    read -r choice </dev/tty
+
+    case "$choice" in
+        1)
+            print_info "Re-deploying..."
+            kubectl rollout restart "deployment/${deployment}" -n "$namespace" 2>/dev/null
+            aks_wait_rollout "$deployment" "$namespace"
+            return $?
+            ;;
+        2)
+            print_info "Syncing SPC..."
+            aks_spc_from_env
+            aks_sync_secrets_to_keyvault
+            print_info "Re-deploying..."
+            kubectl rollout restart "deployment/${deployment}" -n "$namespace" 2>/dev/null
+            aks_wait_rollout "$deployment" "$namespace"
+            return $?
+            ;;
+        3)
+            print_info "Syncing ConfigMap..."
+            aks_configmap_from_env
+            print_info "Re-deploying..."
+            kubectl rollout restart "deployment/${deployment}" -n "$namespace" 2>/dev/null
+            aks_wait_rollout "$deployment" "$namespace"
+            return $?
+            ;;
+        *)
+            print_warning "Deployment cancelled"
+            print_info "Check your code and run 'xiops deploy' when ready"
+            return 1
+            ;;
+    esac
 }
 
 # =============================================
@@ -173,13 +386,15 @@ aks_show_status() {
 
     echo ""
     echo -e "${BOLD}${WHITE}  Pods:${NC}"
-    kubectl get pods -n "$namespace" -l "app=${service}" --no-headers 2>/dev/null | while read -r line; do
-        local pod_name ready status restarts age
+    kubectl get pods -n "$namespace" -l "app=${service}" -o wide --no-headers 2>/dev/null | while read -r line; do
+        local pod_name ready status restarts age ip node
         pod_name=$(echo "$line" | awk '{print $1}')
         ready=$(echo "$line" | awk '{print $2}')
         status=$(echo "$line" | awk '{print $3}')
         restarts=$(echo "$line" | awk '{print $4}')
         age=$(echo "$line" | awk '{print $5}')
+        ip=$(echo "$line" | awk '{print $6}')
+        node=$(echo "$line" | awk '{print $7}')
 
         local status_icon
         if [[ "$status" == "Running" ]]; then
@@ -190,6 +405,7 @@ aks_show_status() {
 
         echo -e "   ${status_icon} ${CYAN}${pod_name}${NC}"
         echo -e "      ${DIM}Ready:${NC} ${ready}  ${DIM}Status:${NC} ${status}  ${DIM}Restarts:${NC} ${restarts}  ${DIM}Age:${NC} ${age}"
+        echo -e "      ${DIM}IP:${NC} ${ip}  ${DIM}Node:${NC} ${node}"
     done
 
     echo ""
@@ -379,4 +595,347 @@ aks_describe() {
     fi
 
     kubectl describe pod "$pod" -n "$namespace"
+}
+
+# =============================================
+# Generate ConfigMap from .env file
+# Uses inline comments to determine what goes where:
+#   VAR=value # SECRET=NO  -> ConfigMap
+#   VAR=value # SECRET=YES -> SecretProviderClass
+# =============================================
+aks_configmap_from_env() {
+    local env_file="${1:-.env}"
+    local configmap_name="${2:-${SERVICE_NAME}-config}"
+    local namespace="${3:-$NAMESPACE}"
+    local output_file="${4:-}"
+    local apply="${5:-false}"
+
+    if [[ ! -f "$env_file" ]]; then
+        print_error "Env file not found: $env_file"
+        return 1
+    fi
+
+    print_section "📋 Generating ConfigMap from ${env_file}"
+    print_info "Looking for variables with # SECRET=NO"
+
+    # Build the configmap YAML
+    local configmap_yaml="apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${configmap_name}
+  namespace: ${namespace}
+data:"
+
+    local count=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comment-only lines
+        if [[ -z "${line// }" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        # Check if line has SECRET=NO (case insensitive, space after # optional)
+        if [[ "$line" =~ \#[[:space:]]*SECRET[[:space:]]*=[[:space:]]*(NO|no|No|false|FALSE|False)[[:space:]]*$ ]]; then
+            # Extract the var=value part (before the comment)
+            local var_part="${line%%#*}"
+            var_part="${var_part%% }"  # Trim trailing space
+
+            # Extract key and value
+            local key="${var_part%%=*}"
+            local value="${var_part#*=}"
+
+            # Remove quotes from value
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+            value="${value%% }"  # Trim trailing space
+
+            # Add to configmap
+            configmap_yaml="${configmap_yaml}
+  ${key}: \"${value}\""
+            count=$((count + 1))
+            print_step "Added: ${key}"
+        fi
+
+    done < "$env_file"
+
+    if [[ $count -eq 0 ]]; then
+        print_warning "No ConfigMap values found"
+        print_info "Mark values with '# SECRET=NO' at end of line in .env"
+        echo ""
+        echo "Example .env format:"
+        echo "  APP_ENV=production # SECRET=NO"
+        echo "  LOG_LEVEL=info # SECRET=NO"
+        echo "  DATABASE_URL=postgres://... # SECRET=YES"
+        return 1
+    fi
+
+    print_success "Found ${count} ConfigMap values"
+
+    # Always write to k8s/configmap.yaml
+    local k8s_dir="${XIOPS_PROJECT_DIR}/k8s"
+    local output_path="${k8s_dir}/configmap.yaml"
+
+    # Create k8s dir if it doesn't exist
+    mkdir -p "$k8s_dir"
+
+    echo "$configmap_yaml" > "$output_path"
+    print_success "ConfigMap written to: ${output_path}"
+    print_info "Will be applied during 'xiops deploy'"
+
+    return 0
+}
+
+# =============================================
+# Generate SecretProviderClass from .env file
+# Uses inline comments: VAR=value # SECRET=YES
+# =============================================
+aks_spc_from_env() {
+    local env_file="${1:-.env}"
+    local spc_name="${2:-${SERVICE_NAME}-spc}"
+    local namespace="${3:-$NAMESPACE}"
+    local output_file="${4:-}"
+    local apply="${5:-false}"
+
+    if [[ ! -f "$env_file" ]]; then
+        print_error "Env file not found: $env_file"
+        return 1
+    fi
+
+    print_section "🔐 Generating SecretProviderClass from ${env_file}"
+    print_info "Looking for variables with # SECRET=YES"
+
+    # Collect secret keys
+    local secret_keys=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comment-only lines
+        if [[ -z "${line// }" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        # Check if line has SECRET=YES (case insensitive, space after # optional)
+        if [[ "$line" =~ \#[[:space:]]*SECRET[[:space:]]*=[[:space:]]*(YES|yes|Yes|true|TRUE|True)[[:space:]]*$ ]]; then
+            # Extract the var=value part (before the comment)
+            local var_part="${line%%#*}"
+            local key="${var_part%%=*}"
+            key="${key%% }"  # Trim trailing space
+
+            secret_keys+=("$key")
+            print_step "Added: ${key}"
+        fi
+
+    done < "$env_file"
+
+    if [[ ${#secret_keys[@]} -eq 0 ]]; then
+        print_warning "No secrets found"
+        print_info "Mark secrets with '# SECRET=YES' at end of line in .env"
+        echo ""
+        echo "Example .env format:"
+        echo "  DATABASE_URL=postgres://... # SECRET=YES"
+        echo "  API_KEY=xxx # SECRET=YES"
+        return 1
+    fi
+
+    print_success "Found ${#secret_keys[@]} secrets"
+
+    # Build objects array for SPC
+    local objects_yaml=""
+    for key in "${secret_keys[@]}"; do
+        # Convert KEY_NAME to key-name for Key Vault
+        local kv_name=$(echo "$key" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+        objects_yaml="${objects_yaml}
+        - |
+          objectName: ${kv_name}
+          objectType: secret
+          objectAlias: ${key}"
+    done
+
+    # Build secretObjects for K8s secret sync
+    local secret_data=""
+    for key in "${secret_keys[@]}"; do
+        local kv_name=$(echo "$key" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+        secret_data="${secret_data}
+        - objectName: ${kv_name}
+          key: ${key}"
+    done
+
+    # Build the SPC YAML
+    local spc_yaml="apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: ${spc_name}
+  namespace: ${namespace}
+spec:
+  provider: azure
+  secretObjects:
+  - secretName: ${SERVICE_NAME}-secrets
+    type: Opaque
+    data:${secret_data}
+  parameters:
+    usePodIdentity: \"false\"
+    useVMManagedIdentity: \"false\"
+    clientID: \"\${WORKLOAD_IDENTITY_CLIENT_ID}\"
+    keyvaultName: \"\${KEY_VAULT_NAME}\"
+    tenantId: \"\${AZURE_TENANT_ID}\"
+    objects: |
+      array:${objects_yaml}"
+
+    # Always write to k8s/secret-provider-class.yaml
+    local k8s_dir="${XIOPS_PROJECT_DIR}/k8s"
+    local output_path="${k8s_dir}/secret-provider-class.yaml"
+
+    # Create k8s dir if it doesn't exist
+    mkdir -p "$k8s_dir"
+
+    echo "$spc_yaml" > "$output_path"
+    print_success "SecretProviderClass written to: ${output_path}"
+    print_info "Will be applied during 'xiops deploy'"
+
+    return 0
+}
+
+# =============================================
+# Sync SECRET=YES values to Azure Key Vault
+# =============================================
+aks_sync_secrets_to_keyvault() {
+    local env_file="${1:-.env}"
+
+    if [[ ! -f "$env_file" ]]; then
+        print_error "Env file not found: $env_file"
+        return 1
+    fi
+
+    if [[ -z "${KEY_VAULT_NAME:-}" ]]; then
+        print_error "KEY_VAULT_NAME not set in .env"
+        return 1
+    fi
+
+    print_section "🔐 Syncing Secrets to Azure Key Vault"
+    print_info "Key Vault: ${KEY_VAULT_NAME}"
+    print_info "Looking for variables with #SECRET=YES"
+    echo ""
+
+    local synced=0
+    local skipped=0
+    local failed=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comment-only lines
+        if [[ -z "${line// }" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        # Check if line has SECRET=YES
+        if [[ "$line" =~ \#[[:space:]]*SECRET[[:space:]]*=[[:space:]]*(YES|yes|Yes|true|TRUE|True)[[:space:]]*$ ]]; then
+            # Extract the var=value part (before the comment)
+            local var_part="${line%%#*}"
+            local key="${var_part%%=*}"
+            local value="${var_part#*=}"
+
+            # Trim spaces
+            key="${key%% }"
+            value="${value%% }"
+
+            # Remove quotes from value
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+
+            # Convert KEY_NAME to key-name for Key Vault
+            local kv_name=$(echo "$key" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+
+            print_step "Processing: ${key} -> ${kv_name}"
+
+            # Check if secret already exists
+            local existing_value
+            existing_value=$(az keyvault secret show \
+                --vault-name "$KEY_VAULT_NAME" \
+                --name "$kv_name" \
+                --query "value" -o tsv 2>/dev/null || echo "")
+
+            if [[ -n "$existing_value" ]]; then
+                if [[ "$existing_value" == "$value" ]]; then
+                    print_info "  ↳ Already up to date, skipping"
+                    skipped=$((skipped + 1))
+                    continue
+                else
+                    print_warning "  ↳ Secret exists with different value"
+                    if ! confirm "  Override ${kv_name}?"; then
+                        print_info "  ↳ Skipped"
+                        skipped=$((skipped + 1))
+                        continue
+                    fi
+                fi
+            fi
+
+            # Set the secret
+            local az_output
+            local az_exit_code
+            az_output=$(az keyvault secret set \
+                --vault-name "$KEY_VAULT_NAME" \
+                --name "$kv_name" \
+                --value "$value" 2>&1) && az_exit_code=0 || az_exit_code=$?
+
+            if [[ $az_exit_code -eq 0 ]]; then
+                print_success "  ↳ Set: ${kv_name}"
+                synced=$((synced + 1))
+            else
+                print_error "  ↳ Failed to set: ${kv_name}"
+                echo -e "     ${RED}${az_output}${NC}"
+                failed=$((failed + 1))
+            fi
+        fi
+
+    done < "$env_file"
+
+    echo ""
+    print_section "📊 Sync Summary"
+    echo -e "   ${GREEN}●${NC} Synced:  ${synced}"
+    echo -e "   ${YELLOW}●${NC} Skipped: ${skipped}"
+    if [[ $failed -gt 0 ]]; then
+        echo -e "   ${RED}●${NC} Failed:  ${failed}"
+    fi
+    echo ""
+
+    if [[ $failed -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# =============================================
+# Show current ConfigMap values
+# =============================================
+aks_configmap_show() {
+    local configmap_name="${1:-${SERVICE_NAME}-config}"
+    local namespace="${2:-$NAMESPACE}"
+
+    print_section "📋 ConfigMap: ${configmap_name}"
+
+    if ! kubectl get configmap "$configmap_name" -n "$namespace" &>/dev/null; then
+        print_error "ConfigMap not found: $configmap_name"
+        return 1
+    fi
+
+    kubectl get configmap "$configmap_name" -n "$namespace" -o yaml | grep -A 1000 "^data:" | tail -n +2
+}
+
+# =============================================
+# Delete ConfigMap
+# =============================================
+aks_configmap_delete() {
+    local configmap_name="${1:-${SERVICE_NAME}-config}"
+    local namespace="${2:-$NAMESPACE}"
+
+    print_step "Deleting ConfigMap: ${configmap_name}..."
+
+    if kubectl delete configmap "$configmap_name" -n "$namespace"; then
+        print_success "ConfigMap deleted"
+    else
+        print_error "Failed to delete ConfigMap"
+        return 1
+    fi
 }

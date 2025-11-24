@@ -62,15 +62,35 @@ load_env() {
     set -a
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Skip comments and empty lines
-        [[ "$line" =~ ^#.*$ ]] && continue
-        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*#.*$ ]] && continue
+        [[ -z "${line// }" ]] && continue
 
-        # Remove carriage returns and export
+        # Remove carriage returns
         line=$(echo "$line" | tr -d '\r')
 
         # Only process lines that look like VAR=value
         if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-            eval "export $line" 2>/dev/null || true
+            # Strip inline comments (#SECRET=YES/NO etc) but preserve the value
+            # Handle: VAR=value #comment -> VAR=value
+            local var_name="${line%%=*}"
+            local var_value="${line#*=}"
+
+            # Remove inline comment (everything after space+#)
+            var_value="${var_value%% \#*}"
+            var_value="${var_value%%	\#*}"  # Also handle tab+#
+
+            # Remove quotes if present
+            var_value="${var_value#\"}"
+            var_value="${var_value%\"}"
+            var_value="${var_value#\'}"
+            var_value="${var_value%\'}"
+
+            # Trim trailing whitespace
+            var_value="${var_value%% }"
+            var_value="${var_value%%	}"
+
+            # Export the clean variable
+            export "$var_name=$var_value" 2>/dev/null || true
         fi
     done < "$env_file"
     set +a

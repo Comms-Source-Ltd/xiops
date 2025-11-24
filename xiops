@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # Get the directory where xiops is installed
 XIOPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +19,7 @@ source "${XIOPS_DIR}/lib/aks.sh"
 source "${XIOPS_DIR}/lib/keyvault.sh"
 source "${XIOPS_DIR}/lib/kubectl.sh"
 source "${XIOPS_DIR}/lib/migrate.sh"
+source "${XIOPS_DIR}/lib/ai.sh"
 
 # =============================================
 # Help text
@@ -48,6 +49,14 @@ show_help() {
     echo -e "    ${CYAN}migrate status${NC}  Show current migration revision"
     echo -e "    ${CYAN}migrate history${NC} Show migration history"
     echo -e "    ${CYAN}migrate down${NC}    Downgrade migration"
+    echo ""
+    echo -e "${BOLD}CONFIGMAP COMMANDS:${NC} ${DIM}(SECRET=NO vars)${NC}"
+    echo -e "    ${CYAN}configmap${NC}           Generate k8s/configmap.yaml"
+    echo -e "    ${CYAN}configmap show${NC}      Show current ConfigMap in cluster"
+    echo ""
+    echo -e "${BOLD}SPC COMMANDS:${NC} ${DIM}(SECRET=YES vars)${NC}"
+    echo -e "    ${CYAN}spc${NC}                 Generate k8s/secret-provider-class.yaml"
+    echo -e "    ${CYAN}spc sync${NC}            Sync secrets to Azure Key Vault"
     echo ""
     echo -e "${BOLD}KEY VAULT COMMANDS:${NC}"
     echo -e "    ${CYAN}secret list${NC}     List secrets in Key Vault"
@@ -94,6 +103,17 @@ show_help() {
     echo "    xiops migrate status           # Show current revision"
     echo "    xiops migrate history          # Show migration history"
     echo "    xiops deploy --skip-migrations # Deploy without running migrations"
+    echo ""
+    echo -e "${BOLD}CONFIGMAP/SPC EXAMPLES:${NC}"
+    echo "    xiops configmap                # Generate k8s/configmap.yaml"
+    echo "    xiops spc                      # Generate k8s/secret-provider-class.yaml"
+    echo "    xiops spc sync                 # Sync secrets to Key Vault"
+    echo ""
+    echo -e "${BOLD}.ENV FORMAT:${NC}"
+    echo "    APP_ENV=production #SECRET=NO"
+    echo "    LOG_LEVEL=info #SECRET=NO"
+    echo "    DATABASE_URL=postgres://... #SECRET=YES"
+    echo "    API_KEY=xxx #SECRET=YES"
     echo ""
     echo -e "${BOLD}KEY VAULT EXAMPLES:${NC}"
     echo "    xiops secret list              # List all secrets"
@@ -585,6 +605,80 @@ cmd_migrate() {
 }
 
 # =============================================
+# ConfigMap command (for SECRET=NO vars)
+# =============================================
+cmd_configmap() {
+    local subcommand="${1:-}"
+    local arg1="${2:-}"
+
+    load_env || exit 1
+
+    case "$subcommand" in
+        ""|generate|gen)
+            print_header "📋 XIOPS - Generate ConfigMap"
+            local env_file="${CONFIGMAP_ENV_FILE:-.env}"
+            aks_configmap_from_env "$env_file" "${SERVICE_NAME}-config" "$NAMESPACE"
+            ;;
+        show|view)
+            print_header "📋 XIOPS - Show ConfigMap"
+            aks_connect || exit 1
+            aks_configmap_show "${arg1:-${SERVICE_NAME}-config}" "$NAMESPACE"
+            ;;
+        *)
+            print_error "Unknown configmap subcommand: $subcommand"
+            echo ""
+            echo "Available subcommands:"
+            echo "    generate        Generate k8s/configmap.yaml (SECRET=NO vars)"
+            echo "    show [name]     Show current ConfigMap values in cluster"
+            echo ""
+            echo "Options:"
+            echo "    -f, --file FILE     Use specific .env file (default: .env)"
+            echo ""
+            echo ".env format:"
+            echo "    VAR=value #SECRET=NO   -> goes to k8s/configmap.yaml"
+            exit 1
+            ;;
+    esac
+}
+
+# =============================================
+# SPC command (for SECRET=YES vars)
+# =============================================
+cmd_spc() {
+    local subcommand="${1:-}"
+    local arg1="${2:-}"
+
+    load_env || exit 1
+
+    case "$subcommand" in
+        ""|generate|gen)
+            print_header "🔐 XIOPS - Generate SecretProviderClass"
+            local env_file="${CONFIGMAP_ENV_FILE:-.env}"
+            aks_spc_from_env "$env_file" "${SERVICE_NAME}-spc" "$NAMESPACE"
+            ;;
+        sync|push)
+            print_header "🔐 XIOPS - Sync Secrets to Key Vault"
+            local env_file="${CONFIGMAP_ENV_FILE:-.env}"
+            aks_sync_secrets_to_keyvault "$env_file"
+            ;;
+        *)
+            print_error "Unknown spc subcommand: $subcommand"
+            echo ""
+            echo "Available subcommands:"
+            echo "    generate        Generate k8s/secret-provider-class.yaml (SECRET=YES vars)"
+            echo "    sync            Sync SECRET=YES values to Azure Key Vault"
+            echo ""
+            echo "Options:"
+            echo "    -f, --file FILE     Use specific .env file (default: .env)"
+            echo ""
+            echo ".env format:"
+            echo "    VAR=value #SECRET=YES  -> goes to k8s/secret-provider-class.yaml + Key Vault"
+            exit 1
+            ;;
+    esac
+}
+
+# =============================================
 # kubectl help
 # =============================================
 show_k_help() {
@@ -847,6 +941,10 @@ K_ARG2=""
 K_ARG3=""
 MIGRATE_SUBCOMMAND=""
 MIGRATE_ARG1=""
+CONFIGMAP_SUBCOMMAND=""
+CONFIGMAP_ARG1=""
+CONFIGMAP_ENV_FILE=""
+CONFIGMAP_OUTPUT_FILE=""
 SKIP_MIGRATIONS="false"
 
 while [[ $# -gt 0 ]]; do
@@ -876,6 +974,48 @@ while [[ $# -gt 0 ]]; do
             MIGRATE_SUBCOMMAND="${2:-}"
             MIGRATE_ARG1="${3:-}"
             shift $#
+            ;;
+        configmap|cm)
+            COMMAND="configmap"
+            shift
+            # Parse configmap subcommand and options
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -f|--file)
+                        CONFIGMAP_ENV_FILE="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [[ -z "$CONFIGMAP_SUBCOMMAND" ]]; then
+                            CONFIGMAP_SUBCOMMAND="$1"
+                        elif [[ -z "$CONFIGMAP_ARG1" ]]; then
+                            CONFIGMAP_ARG1="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+            ;;
+        spc)
+            COMMAND="spc"
+            shift
+            # Parse spc subcommand and options
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -f|--file)
+                        CONFIGMAP_ENV_FILE="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [[ -z "$CONFIGMAP_SUBCOMMAND" ]]; then
+                            CONFIGMAP_SUBCOMMAND="$1"
+                        elif [[ -z "$CONFIGMAP_ARG1" ]]; then
+                            CONFIGMAP_ARG1="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
             ;;
         secret)
             COMMAND="secret"
@@ -944,6 +1084,12 @@ case "$COMMAND" in
         ;;
     migrate)
         cmd_migrate "$MIGRATE_SUBCOMMAND" "$MIGRATE_ARG1"
+        ;;
+    configmap)
+        cmd_configmap "$CONFIGMAP_SUBCOMMAND" "$CONFIGMAP_ARG1"
+        ;;
+    spc)
+        cmd_spc "$CONFIGMAP_SUBCOMMAND" "$CONFIGMAP_ARG1"
         ;;
     k)
         cmd_k "$K_SUBCOMMAND" "$K_ARG1" "$K_ARG2" "$K_ARG3"
