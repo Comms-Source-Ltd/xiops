@@ -159,10 +159,12 @@ aks_wait_rollout() {
         echo -e "${BOLD}${WHITE}Pod Status (${elapsed}s elapsed):${NC}"
         if [[ -n "$pod_info" ]]; then
             echo "$pod_info" | while read -r line; do
-                local pod_name status ready node
+                local pod_name ready status restarts age node
                 pod_name=$(echo "$line" | awk '{print $1}')
                 ready=$(echo "$line" | awk '{print $2}')
                 status=$(echo "$line" | awk '{print $3}')
+                restarts=$(echo "$line" | awk '{print $4}')
+                age=$(echo "$line" | awk '{print $5}')
                 node=$(echo "$line" | awk '{print $7}')
 
                 local icon
@@ -182,7 +184,19 @@ aks_wait_rollout() {
                         ;;
                 esac
 
-                echo -e "  ${icon} ${CYAN}${pod_name}${NC} ${DIM}${ready}${NC} ${status} ${DIM}${node}${NC}"
+                # Highlight restarts if > 0
+                local restart_display="${DIM}${restarts}${NC}"
+                if [[ "$restarts" != "0" ]]; then
+                    restart_display="${YELLOW}${restarts}${NC}"
+                fi
+
+                # Truncate node name to 15 characters
+                local node_short="${node:0:15}"
+                if [[ "${#node}" -gt 15 ]]; then
+                    node_short="${node_short}..."
+                fi
+
+                echo -e "  ${icon} ${CYAN}${pod_name}${NC} ${DIM}${ready}${NC} ${status} ${DIM}age:${NC}${age} ${DIM}restarts:${NC}${restart_display} ${DIM}${node_short}${NC}"
             done
         else
             echo -e "  ${YELLOW}No pods found${NC}"
@@ -403,9 +417,15 @@ aks_show_status() {
             status_icon="${YELLOW}●${NC}"
         fi
 
+        # Truncate node name to 15 characters
+        local node_short="${node:0:15}"
+        if [[ "${#node}" -gt 15 ]]; then
+            node_short="${node_short}..."
+        fi
+
         echo -e "   ${status_icon} ${CYAN}${pod_name}${NC}"
         echo -e "      ${DIM}Ready:${NC} ${ready}  ${DIM}Status:${NC} ${status}  ${DIM}Restarts:${NC} ${restarts}  ${DIM}Age:${NC} ${age}"
-        echo -e "      ${DIM}IP:${NC} ${ip}  ${DIM}Node:${NC} ${node}"
+        echo -e "      ${DIM}IP:${NC} ${ip}  ${DIM}Node:${NC} ${node_short}"
     done
 
     echo ""
