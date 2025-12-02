@@ -54,26 +54,104 @@ aks_process_manifests() {
     rm -rf "$processed_dir"
     mkdir -p "$processed_dir"
 
-    # Export variables for envsubst
+    # Export only Kubernetes-related variables for envsubst
+    # NOTE: Application config should be in ConfigMap (generated with 'xiops configmap')
+    # not as placeholders in manifest files
     export NAMESPACE
     export ACR_NAME
     export IMAGE_TAG
     export IMAGE_NAME="${IMAGE_NAME:-$SERVICE_NAME}"
     export SERVICE_NAME
-    export WORKLOAD_IDENTITY_CLIENT_ID
-    export KEY_VAULT_NAME
-    export AZURE_TENANT_ID="${TENANT_ID}"
+    export WORKLOAD_IDENTITY_CLIENT_ID="${WORKLOAD_IDENTITY_CLIENT_ID:-}"
+    export KEY_VAULT_NAME="${KEY_VAULT_NAME:-}"
+    export AZURE_TENANT_ID="${TENANT_ID:-}"
+    export SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"
 
-    # Process each yaml file to the processed directory
-    local files=("kustomization.yaml" "deployment.yaml" "configmap.yaml" "service.yaml" "secret-provider-class.yaml" "hpa.yaml")
+    # Process all yaml files in k8s directory
+    local file_count=0
+    for file in "${k8s_dir}"/*.yaml "${k8s_dir}"/*.yml; do
+        if [[ -f "$file" ]]; then
+            local filename=$(basename "$file")
+            print_step "Processing ${filename}..."
 
-    for file in "${files[@]}"; do
-        if [[ -f "${k8s_dir}/${file}" ]]; then
-            print_step "Processing ${file}..."
-            envsubst < "${k8s_dir}/${file}" > "${processed_dir}/${file}"
-            print_success "${file} processed"
+            # Process with envsubst
+            envsubst < "$file" > "${processed_dir}/${filename}"
+
+            # Validate YAML syntax (skip kustomization.yaml as it's not a K8s resource)
+            if [[ "$filename" != "kustomization.yaml" ]] && command -v kubectl &>/dev/null; then
+                local validation_output
+                validation_output=$(kubectl apply --dry-run=client -f "${processed_dir}/${filename}" 2>&1)
+                if [[ $? -ne 0 ]]; then
+                    print_error "${filename} failed validation after envsubst"
+                    echo ""
+                    echo "$validation_output"
+                    echo ""
+                    print_info "Common issues:"
+                    echo "  • ConfigMap variables should use 'xiops configmap' command"
+                    echo "  • Don't use \$APP_NAME, \$DEBUG, etc. in k8s/*.yaml files"
+                    echo "  • Only use: \$NAMESPACE, \$SERVICE_NAME, \$IMAGE_TAG, \$ACR_NAME"
+                    echo ""
+                    echo "Preview of processed ${filename}:"
+                    head -30 "${processed_dir}/${filename}"
+                    return 1
+                fi
+            fi
+
+            print_success "${filename} processed"
+            ((file_count++))
         fi
     done
+
+    if [[ $file_count -eq 0 ]]; then
+        print_error "No YAML files found in ${k8s_dir}"
+        return 1
+    fi
+
+    # Validate kustomization.yaml if it exists
+    if [[ -f "${processed_dir}/kustomization.yaml" ]]; then
+        print_step "Validating kustomization.yaml..."
+
+        # Check if resources listed in kustomization.yaml exist
+        # Only check lines under 'resources:' section
+        local missing_files=()
+        local in_resources_section=false
+
+        while IFS= read -r line; do
+            # Check if we're entering the resources section
+            if [[ "$line" =~ ^resources:[[:space:]]*$ ]]; then
+                in_resources_section=true
+                continue
+            fi
+
+            # Check if we've left the resources section (new top-level key)
+            if [[ "$line" =~ ^[a-zA-Z] ]] && [[ "$in_resources_section" == "true" ]]; then
+                in_resources_section=false
+            fi
+
+            # If in resources section and line starts with -, extract the file
+            if [[ "$in_resources_section" == "true" ]] && [[ "$line" =~ ^[[:space:]]*-[[:space:]]*(.+\.ya?ml) ]]; then
+                local resource="${BASH_REMATCH[1]}"
+                # Remove any trailing comments
+                resource="${resource%%#*}"
+                resource="${resource%% }"
+
+                if [[ ! -f "${processed_dir}/${resource}" ]]; then
+                    missing_files+=("$resource")
+                fi
+            fi
+        done < "${processed_dir}/kustomization.yaml"
+
+        if [[ ${#missing_files[@]} -gt 0 ]]; then
+            print_error "kustomization.yaml references missing files:"
+            for missing in "${missing_files[@]}"; do
+                echo "  ✗ ${missing}"
+            done
+            print_info "Please ensure all files referenced in kustomization.yaml exist in ${k8s_dir}"
+            return 1
+        fi
+
+        print_success "kustomization.yaml validated"
+    fi
 
     # Store processed dir for apply step
     export XIOPS_PROCESSED_DIR="$processed_dir"
@@ -89,27 +167,108 @@ aks_apply_manifests() {
 
     print_step "Applying manifests with kustomize..."
 
+    local apply_output
     if [[ -f "${k8s_dir}/kustomization.yaml" ]]; then
-        kubectl apply -k "$k8s_dir"
+        apply_output=$(kubectl apply -k "$k8s_dir" 2>&1)
+        local apply_result=$?
     else
         # Fallback to applying all yaml files
-        kubectl apply -f "$k8s_dir"
+        apply_output=$(kubectl apply -f "$k8s_dir" 2>&1)
+        local apply_result=$?
     fi
 
-    print_success "All manifests applied"
+    # Track if deployment was recreated (skip rollout restart if true)
+    local deployment_recreated=false
+
+    # Check for immutable field errors
+    if [[ $apply_result -ne 0 ]]; then
+        if echo "$apply_output" | grep -q "field is immutable"; then
+            print_warning "Deployment selector is immutable and cannot be updated"
+            echo ""
+            echo "$apply_output" | grep "is invalid"
+            echo ""
+            print_info "This happens when deployment labels/selectors change"
+            echo ""
+
+            if confirm "Delete and recreate deployment?"; then
+                local deployment_name="${SERVICE_NAME}"
+                print_step "Deleting deployment ${deployment_name}..."
+                kubectl delete deployment "${deployment_name}" -n "$NAMESPACE" 2>/dev/null || true
+
+                print_step "Recreating deployment..."
+                if [[ -f "${k8s_dir}/kustomization.yaml" ]]; then
+                    kubectl apply -k "$k8s_dir"
+                else
+                    kubectl apply -f "$k8s_dir"
+                fi
+                print_success "Deployment recreated"
+                deployment_recreated=true
+            else
+                print_error "Deployment cancelled"
+                return 1
+            fi
+        else
+            print_error "Failed to apply manifests"
+            echo ""
+            echo "$apply_output"
+            return 1
+        fi
+    else
+        echo "$apply_output"
+        print_success "All manifests applied"
+    fi
 
     # Clean up processed directory
     if [[ -n "$XIOPS_PROCESSED_DIR" && -d "$XIOPS_PROCESSED_DIR" ]]; then
         rm -rf "$XIOPS_PROCESSED_DIR"
     fi
 
-    # Force rollout restart to ensure new image is pulled
-    local deployment="${SERVICE_NAME}"
-    print_step "Triggering rollout restart for ${deployment}..."
-    kubectl rollout restart "deployment/${deployment}" -n "$NAMESPACE" 2>/dev/null || true
-    print_success "Rollout restart triggered"
+    # Force rollout restart to ensure new image is pulled (skip if just recreated)
+    if [[ "$deployment_recreated" == "false" ]]; then
+        local deployment="${SERVICE_NAME}"
+        print_step "Triggering rollout restart for ${deployment}..."
+        kubectl rollout restart "deployment/${deployment}" -n "$NAMESPACE" 2>/dev/null || true
+        print_success "Rollout restart triggered"
+    else
+        print_info "Skipping rollout restart (deployment was just recreated)"
+    fi
 
     return 0
+}
+
+# =============================================
+# Get pods for deployment (handles various label selectors)
+# =============================================
+aks_get_pods() {
+    local deployment="$1"
+    local namespace="$2"
+    local output_format="${3:--o wide --no-headers}"
+
+    local pod_info=""
+
+    # Try common label selectors in order
+    for selector in "app=${deployment}" "app.kubernetes.io/name=${deployment}"; do
+        pod_info=$(kubectl get pods -n "$namespace" -l "$selector" $output_format 2>/dev/null)
+        if [[ -n "$pod_info" ]]; then
+            echo "$pod_info"
+            return 0
+        fi
+    done
+
+    # If still no pods, get the deployment's actual selector and use it
+    if kubectl get deployment "$deployment" -n "$namespace" &>/dev/null; then
+        # Extract the first label from the deployment selector
+        local selector_labels
+        selector_labels=$(kubectl get deployment "$deployment" -n "$namespace" \
+            -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null | \
+            grep -o '"[^"]*":"[^"]*"' | head -1 | sed 's/"//g' | tr ':' '=' | tr ',' '=')
+
+        if [[ -n "$selector_labels" ]]; then
+            pod_info=$(kubectl get pods -n "$namespace" -l "$selector_labels" $output_format 2>/dev/null)
+        fi
+    fi
+
+    echo "$pod_info"
 }
 
 # =============================================
@@ -126,8 +285,8 @@ aks_wait_rollout() {
 
     local start_time=$(date +%s)
 
-    # Wait briefly for pods to start creating
-    sleep 3
+    # Wait for pods to start creating (longer wait after rollout restart)
+    sleep 5
 
     # Monitor pods until ready or error
     while true; do
@@ -140,9 +299,9 @@ aks_wait_rollout() {
             return 1
         fi
 
-        # Get pod status
+        # Get pod status using helper function
         local pod_info
-        pod_info=$(kubectl get pods -n "$namespace" -l "app=${deployment}" --no-headers -o wide 2>/dev/null)
+        pod_info=$(aks_get_pods "$deployment" "$namespace")
 
         # Count ready pods
         local total_pods ready_pods
@@ -154,9 +313,113 @@ aks_wait_rollout() {
             ready_pods=0
         fi
 
+        # Check for scheduling failures early (before showing status)
+        if [[ -z "$pod_info" && $elapsed -ge 10 ]]; then
+            local latest_rs
+            latest_rs=$(kubectl get rs -n "$namespace" --no-headers 2>/dev/null | grep "^${deployment}" | sort -k5 -r | head -1 | awk '{print $1}')
+            if [[ -n "$latest_rs" ]]; then
+                local rs_events
+                rs_events=$(kubectl describe rs "$latest_rs" -n "$namespace" 2>/dev/null | sed -n '/^Events:/,$ p')
+
+                # Check for scheduling failures (insufficient resources, etc.)
+                if echo "$rs_events" | grep -qiE "FailedScheduling|Insufficient (cpu|memory)|max node group size reached"; then
+                    echo ""
+                    echo -e "${BOLD}${WHITE}Pod Status (${elapsed}s elapsed):${NC}"
+                    echo ""
+                    print_error "Pod scheduling failure detected"
+                    echo ""
+                    echo "$rs_events" | tail -10
+                    echo ""
+
+                    if echo "$rs_events" | grep -qi "Insufficient cpu"; then
+                        echo -e "${YELLOW}Cause:${NC} Cluster has insufficient CPU resources"
+                        echo ""
+                        echo -e "${BOLD}Solutions:${NC}"
+                        echo "  1. Reduce CPU requests in your deployment spec"
+                        echo "  2. Scale up your AKS node pool:"
+                        echo "     ${CYAN}az aks nodepool scale --resource-group $RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME --name <pool-name> --node-count <count>${NC}"
+                        echo "  3. Increase max node count for autoscaling:"
+                        echo "     ${CYAN}az aks nodepool update --resource-group $RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME --name <pool-name> --max-count <new-max>${NC}"
+                    elif echo "$rs_events" | grep -qi "Insufficient memory"; then
+                        echo -e "${YELLOW}Cause:${NC} Cluster has insufficient memory resources"
+                        echo ""
+                        echo -e "${BOLD}Solutions:${NC}"
+                        echo "  1. Reduce memory requests in your deployment spec"
+                        echo "  2. Scale up your AKS node pool"
+                        echo "  3. Increase max node count for autoscaling"
+                    fi
+                    echo ""
+                    return 1
+                fi
+            fi
+        fi
+
         # Display current status
         echo ""
         echo -e "${BOLD}${WHITE}Pod Status (${elapsed}s elapsed):${NC}"
+
+        # Debug: Show deployment status if no pods found
+        if [[ -z "$pod_info" && $elapsed -le 30 ]]; then
+            local deploy_status
+            deploy_status=$(kubectl get deployment "$deployment" -n "$namespace" -o jsonpath='{.status.replicas},{.status.readyReplicas},{.status.unavailableReplicas}' 2>/dev/null)
+            if [[ -n "$deploy_status" ]]; then
+                echo -e "  ${DIM}Deployment: ${deploy_status} (replicas,ready,unavailable)${NC}"
+            fi
+
+            # Show actual selector being used
+            local selector
+            selector=$(kubectl get deployment "$deployment" -n "$namespace" \
+                -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null)
+            if [[ -n "$selector" ]]; then
+                echo -e "  ${DIM}Selector: ${selector}${NC}"
+            fi
+
+            # Show if any pods exist in namespace with different labels
+            local all_pods_count
+            all_pods_count=$(kubectl get pods -n "$namespace" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            echo -e "  ${DIM}Total pods in namespace: ${all_pods_count}${NC}"
+
+            # Show replicasets for this deployment
+            local rs_count
+            rs_count=$(kubectl get rs -n "$namespace" --no-headers 2>/dev/null | grep "^${deployment}" | wc -l | tr -d ' ')
+            if [[ "$rs_count" -gt 0 ]]; then
+                echo -e "  ${DIM}ReplicaSets found: ${rs_count}${NC}"
+                kubectl get rs -n "$namespace" --no-headers 2>/dev/null | grep "^${deployment}" | head -3 | while read -r line; do
+                    echo -e "  ${DIM}  - ${line}${NC}"
+                done
+            fi
+
+            # Show actual pods in namespace to debug label mismatch
+            if [[ $elapsed -ge 10 && $elapsed -le 15 ]]; then
+                echo -e "  ${DIM}All pods in namespace:${NC}"
+                kubectl get pods -n "$namespace" --no-headers 2>/dev/null | while read -r line; do
+                    local pname=$(echo "$line" | awk '{print $1}')
+                    local pstatus=$(echo "$line" | awk '{print $3}')
+                    echo -e "  ${DIM}  - ${pname} (${pstatus})${NC}"
+                done
+
+                # Check deployment events for errors
+                echo -e "  ${DIM}Recent deployment events:${NC}"
+                kubectl describe deployment "$deployment" -n "$namespace" 2>/dev/null | \
+                    sed -n '/^Events:/,$ p' | tail -5 | while read -r line; do
+                    echo -e "  ${DIM}  ${line}${NC}"
+                done
+
+                # Check the latest replicaset events - this is where pod creation failures show up
+                local latest_rs
+                latest_rs=$(kubectl get rs -n "$namespace" --no-headers 2>/dev/null | grep "^${deployment}" | sort -k5 -r | head -1 | awk '{print $1}')
+                if [[ -n "$latest_rs" ]]; then
+                    echo -e "  ${DIM}Latest ReplicaSet (${latest_rs}) events:${NC}"
+                    local rs_events
+                    rs_events=$(kubectl describe rs "$latest_rs" -n "$namespace" 2>/dev/null | sed -n '/^Events:/,$ p')
+
+                    echo "$rs_events" | tail -5 | while read -r line; do
+                        echo -e "  ${DIM}  ${line}${NC}"
+                    done
+                fi
+            fi
+        fi
+
         if [[ -n "$pod_info" ]]; then
             echo "$pod_info" | while read -r line; do
                 local pod_name ready status restarts age node
@@ -199,7 +462,18 @@ aks_wait_rollout() {
                 echo -e "  ${icon} ${CYAN}${pod_name}${NC} ${DIM}${ready}${NC} ${status} ${DIM}age:${NC}${age} ${DIM}restarts:${NC}${restart_display} ${DIM}${node_short}${NC}"
             done
         else
-            echo -e "  ${YELLOW}No pods found${NC}"
+            if [[ $elapsed -le 15 ]]; then
+                echo -e "  ${YELLOW}No pods found (waiting for pods to be scheduled...)${NC}"
+            else
+                echo -e "  ${YELLOW}No pods found${NC}"
+                # After 15s, show selector info for debugging
+                local selector_info
+                selector_info=$(kubectl get deployment "$deployment" -n "$namespace" \
+                    -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null)
+                if [[ -n "$selector_info" ]]; then
+                    echo -e "  ${DIM}Deployment selector: ${selector_info}${NC}"
+                fi
+            fi
         fi
         echo ""
 
@@ -241,8 +515,9 @@ aks_check_events_for_errors() {
 
     # Get the newest pod
     local target_pod
-    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
-        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+    local pods
+    pods=$(aks_get_pods "$deployment" "$namespace" "--sort-by=.metadata.creationTimestamp --no-headers")
+    target_pod=$(echo "$pods" | tail -1 | awk '{print $1}')
 
     if [[ -z "$target_pod" ]]; then
         echo "ok"
@@ -270,8 +545,9 @@ aks_check_and_show_result() {
 
     # Get the newest pod
     local target_pod
-    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
-        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+    local pods
+    pods=$(aks_get_pods "$deployment" "$namespace" "--sort-by=.metadata.creationTimestamp --no-headers")
+    target_pod=$(echo "$pods" | tail -1 | awk '{print $1}')
 
     # Run describe and get events
     local events
@@ -300,8 +576,9 @@ aks_show_error_result() {
 
     # Get the newest pod
     local target_pod
-    target_pod=$(kubectl get pods -n "$namespace" -l "app=${deployment}" \
-        --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null | tail -1 | awk '{print $1}')
+    local pods
+    pods=$(aks_get_pods "$deployment" "$namespace" "--sort-by=.metadata.creationTimestamp --no-headers")
+    target_pod=$(echo "$pods" | tail -1 | awk '{print $1}')
 
     # Get events
     local events
@@ -400,7 +677,7 @@ aks_show_status() {
 
     echo ""
     echo -e "${BOLD}${WHITE}  Pods:${NC}"
-    kubectl get pods -n "$namespace" -l "app=${service}" -o wide --no-headers 2>/dev/null | while read -r line; do
+    aks_get_pods "$service" "$namespace" | while read -r line; do
         local pod_name ready status restarts age ip node
         pod_name=$(echo "$line" | awk '{print $1}')
         ready=$(echo "$line" | awk '{print $2}')
@@ -588,7 +865,9 @@ aks_shell() {
     local shell="${3:-/bin/bash}"
 
     local pod
-    pod=$(kubectl get pod -n "$namespace" -l "app=${service}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    local pods
+    pods=$(aks_get_pods "$service" "$namespace" "--no-headers")
+    pod=$(echo "$pods" | head -1 | awk '{print $1}')
 
     if [[ -z "$pod" ]]; then
         print_error "No pod found for ${service}"
@@ -607,7 +886,9 @@ aks_describe() {
     local service="${2:-$SERVICE_NAME}"
 
     local pod
-    pod=$(kubectl get pod -n "$namespace" -l "app=${service}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    local pods
+    pods=$(aks_get_pods "$service" "$namespace" "--no-headers")
+    pod=$(echo "$pods" | head -1 | awk '{print $1}')
 
     if [[ -z "$pod" ]]; then
         print_error "No pod found for ${service}"
